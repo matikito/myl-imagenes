@@ -1,0 +1,76 @@
+DbMyL — CONTEXTO COMPRIMIDO (pegar esto + subir el .html más reciente en chat nuevo)
+
+PROYECTO
+App deckbuilder para Mitos y Leyendas (TCG chileno). 1 solo archivo HTML standalone (CSS+JS inline, IIFE, sin build/framework). Usa SheetJS (XLSX global) para leer Excel en el navegador. Persistencia: localStorage real vía storageGet/storageSet (NO window.storage de artifacts — el archivo corre fuera de claude.ai, en GitHub Pages).
+Deploy: repo GitHub "matikito/dbmyl.github.io", rama main, publicado en https://matikito.github.io/dbmyl.github.io/
+Convención de nombres de archivo que entrego: DbMyL_0_N.html (N sube con cada iteración). Última vista por mí: DbMyL_0_27.html.
+
+LIMITACIÓN DE HERRAMIENTAS (importante)
+No puedo interactuar con la página en vivo (clicks, subir archivos) ni ejecutar su JS — solo leo HTML estático vía fetch. github.com/.../raw/ suele bloquear robots; blob pages a veces sí cargan. Para inspeccionar contenido binario (xlsx) el usuario debe subirlo directo al chat.
+
+FUENTES DE DATOS (auto-fetch silencioso al abrir la página, con caché localStorage de respaldo)
+1. Cartas: https://raw.githubusercontent.com/matikito/dbmyl.github.io/main/datos/cartasmyl.xlsx
+   - Excel: 1 hoja por edición (Bestiarium, onyria, libertadores, KVM titanes, Escuadron Mecha, Precon, etc). Cada hoja tiene bloques de columnas por tipo (oro/totem/arma/talisman/aliado), cada bloque con sub-columnas Rareza/Nombre/Logo/Imagen(+Raza/Coste/Fuerza según tipo).
+   - parseWorkbook(): detecta fila de tipos, arma bloques, extrae cartas.
+   - card.id = slugify(hoja)+'__'+tipo+'__'+slugify(nombre)+(raza?'__'+slugify(raza):'')
+   - card.edicion = nombre exacto de la hoja (clave interna); EDITION_LABELS = dict hoja->nombre bonito para mostrar.
+2. Imágenes: repo separado "matikito/myl-imagenes", vía manifest.json (id carta -> carpeta). resolveImagenCandidates() prueba varias extensiones si falta en manifest.
+3. Banlists (formato legalidad), mismo repo:
+   - https://raw.githubusercontent.com/matikito/dbmyl.github.io/main/datos/banlist_vcr_julio2026
+   - https://raw.githubusercontent.com/matikito/dbmyl.github.io/main/datos/banlist_imperio_julio2026
+   - (sin extensión en el nombre de archivo en GitHub, pero contenido es .xlsx real — XLSX.read funciona igual)
+   - Cols banlist: [nota][Formato][Nombre][Edición][Estatus]. Estatus: "Prohibida"/"Limitada a una copia"/"Limitada a dos copias"/"Libre"(=sin restricción, se ignora).
+NOTA: inputs de configuración manual de estas URLs (cardsSourceUrlInput, imageRepoRootInput, imageExtInput) EXISTÍAN pero fueron QUITADOS de la UI en una iteración posterior a la mía — ahora están hardcodeadas en el JS (constantes), ya no editables desde la interfaz.
+
+SISTEMA CLAVE: AGRUPACIÓN DE COPIAS POR "NOMBRE BASE" (cardGroupKey)
+Problema resuelto: cartas con el mismo nombre pero reimpresas/variantes con palabra clave al final (ej "Aegishjalmur Leg") NO deben contar como carta distinta para el límite de 3 copias — pero esa palabra a veces SÍ es parte del nombre real (ej "Dragón Dorado", "Escarapela Nacional") y no debe quitarse.
+- CARD_NAME_EXTRA_SUFFIXES (lista fija, dada por el usuario): Jo, Campeón, Campeon, Premier, Comunidad MyL, Campeón MyL, Campeon MyL, Alternativo, Alternativa, Secreto, Secreta, Juez, Arcoiris, Regional, Triada, Dorado, Nacional, Aniversario, Toolkit, Leg, Legendario, Legendaria, Top Nacional (ordenadas por N° palabras desc para matchear frases de 2 palabras primero).
+- rawStrippedName(nombre): intenta quitar SOLO una keyword al final (sin encadenar).
+- buildCardGroupKeys(): decide si la keyword era real sufijo comparando contra TODA la base:
+  regla A: el nombre resultante existe tal cual como OTRA carta en la base -> aceptar.
+  regla B: al menos 2 nombres ORIGINALES distintos reducen al mismo candidato (aunque ese candidato no exista solo) -> aceptar (ej "Envenenar Dorado"+"Envenenar Premier" ambas -> "Envenenar").
+  si ninguna se cumple -> se asume parte del nombre real, no se toca.
+  Cachea resultado en state.cardGroupKeyById (se invalida a null cada vez que cambia state.cards).
+- cardGroupKey(card) = clave para agrupar. groupQtyInPool(poolMap,key) suma copias del grupo dentro de un pool (main o side). totalCopiesForCardGroup(card) = suma en mazo principal + side del mazo activo.
+- Validado contra los 1407 nombres reales del Excel (casos difíciles OK: Dragón Dorado/Dragon Dorado/Dragon Dorado Campéon/Dragon Dorado Top Nacional todos al mismo grupo; Envenenar Dorado+Premier agrupados; Amigo Secreto y Escarapela Nacional NO se rompen mal).
+
+LÍMITE DE COPIAS (usa cardGroupKey en vez de contar por id/edición individual)
+Constantes: MAIN_DECK_LIMIT=50, SIDE_DECK_LIMIT=15, COPY_LIMIT=3.
+addCardCopy/changeMainQty/changeSideQty calculan totalGrupoAntes = totalCopiesForCardGroup(card) ANTES de sumar, luego +1; si nuevoTotal > COPY_LIMIT -> showCopyWarning(card, qty).
+Mensaje de advertencia (acortado a pedido del usuario, va en #copyWarningText):
+  `Error de construcción. Hay más de 3 copias de una carta de nombre "${card.nombre}"`
+refreshCopyWarning(card) la oculta auto si vuelve a <=3 (usa mismo total de grupo).
+
+BOTÓN "ELIMINAR TODAS LAS COPIAS" (vista detalle de mazo guardado, pestaña Mis Mazos)
+Botón 🗑 rojo (#a13a2f), esquina SUPERIOR IZQUIERDA de cada .cascade-stack (el badge dorado de cantidad "x{qty}" queda arriba-derecha, mismo tamaño/box-shadow, opacidad igual). Clase .stack-clear-btn. Click hace stopPropagation (no abre modal de carta), llama removeAllCopiesFromSavedDeck(deckId, cardId, pool) que borra esa entrada del pool (main o side) del mazo GUARDADO (deck.cartas / deck.side), persiste, re-render, toast.
+
+DEST-TOGGLE (slider Mazo/Side-deck)
+Movido (no duplicado) desde el header del panel de mazo hacia la barra superior de la galería de cartas (#gridMeta), quedando en el orden: contador "N cartas" -> toggle Mazo/Side-deck -> botón "⇪ Actualizar Excel". order:1/2/3 vía flex + CSS `.grid-meta .dest-toggle{order:2}` etc. Visible en desktop y mobile (antes solo aparecía si abrías el drawer del panel de mazo en mobile). CSS grid-meta con flex-wrap:wrap para no romperse en pantallas angostas.
+
+SISTEMA DE BANLIST / LEGALIDAD POR FORMATO (no bloquea guardado, solo advierte)
+- state.banlists = {vcr:{}, imperio:{}}, poblado por loadBanlistsFromGithub() (fetch silencioso en init(), tras cargar cartas).
+- parseBanlistEstatus(txt): "prohibid.."->0, "limitada a una/un"->1,"...dos"->2,"...tres"->3, "libre"->null(se descarta), regex numérico fallback.
+- findBanlistCardMatch(nombre,edicion): limpia texto entre paréntesis del nombre banlist, busca match EXACTO por nombre en state.cards; si no hay, 2do intento: busca carta cuyo rawStrippedName(card.nombre) calce (cubre caso "banlist dice 'Cthulhu', catálogo solo tiene 'Cthulhu Leg'"); si hay ambigüedad (>1 candidato) desempata por Edición (EDITION_LABELS). Si no matchea nada, guarda igual la regla con key=normalizeText(nombre limpio) por si se agrega esa carta después.
+- parseBanlistWorkbook(wb) -> {groupKey: {max, estatus, nombre, edicion}}
+- checkDeckLegality(cartasMap, sideMap, formato): recorre ids únicos por cardGroupKey, compara qty total (main+side) contra rule.max, devuelve array de strings tipo:
+  `"Sheut" está limitada a 2 copias en formato Imperio (tienes 3).`
+- Validado con datos reales: 40/40 reglas Imperio matchean, 34/36 VCR matchean en la versión que probé yo (0_20). Había 2 nombres desincronizados entre banlist y Excel de cartas ("Ik'i B'alam" vs "Ik'i Balam", "Misiles de Rastreo" vs "Misil De Rastreo") — CONFIRMADO POR EL USUARIO: ya están resueltos (100% de reglas matcheando) a la fecha de v0_27. No es necesario retocar findBanlistCardMatch por esto.
+- UI: <select> de formato (Sin formato/VCR/Imperio) en panel de armado (#deckFormatSelect) Y en detalle de mazo guardado (#deckDetailFormatSelect). Banner rojo reusa clase .copy-warning (#banlistWarning y #deckDetailBanlistWarning), multi-línea, con ⚠ por carta. renderBanlistWarningInto(wrapId,textId,problems) es el helper compartido. state.activeDeck.formato y deck.formato (persistido) : null|'vcr'|'imperio'. Guardar mazo NUNCA se bloquea; toast avisa cantidad de problemas si los hay. Tarjetas de "Mis mazos" muestran badge .format-badge (rojo .format-badge-illegal si hay ⚠).
+
+CAMBIOS EN v0_27 QUE YO NO HICE (aparecieron al recibir el archivo, hechos en otra sesión/por el usuario) — para que Claude nuevo sepa que ya existen:
+- Simulador de mano/mulligan: modal nuevo en detalle de mazo (#handSimModalOverlay), botón "🎴 Simulador de mano". Roba 8 cartas random del mazo principal (buildHandSimPool = 1 entrada por copia), permite +Robar, Mulligan (redraw manteniendo -1 carta), Mulligan de oro (redraw sin perder carta, solo 1 vez, solo si ≤1 Oro en mano), descartar carta individual (vuelve al pool), reset. state.handSim={pool,hand,goldUsed}. Funciones: buildHandSimPool, drawRandomFrom, startHandSim, handSimDraw, handSimDiscard, handSimMulligan, resetHandSim, renderHandSim, handCardHTML.
+- searchKey(s) = normalizeText(s) sin ningún caracter no-alfanumérico (ignora apóstrofos/espacios/símbolos) — reemplazó normalizeText puro en el buscador de cartas (#searchInput) y filtro de nombre.
+- Fixes mobile: height:100dvh (con fallback 100vh), padding-bottom con env(safe-area-inset-bottom) en grid-scroll y deck-footer para que el botón flotante "Mazo" y gestos de Android/iOS no tapen contenido. viewport-fit=cover en meta viewport.
+- Reordenamiento visual: detalle de mazo ahora usa .detail-top-grid (identidad+nombre a la izq, gráficos donut de tipo/coste a la derecha, antes iban abajo apilados). Botón simulador de mano bajo los datos de identidad.
+- filter-select .rail usa font-family Helvetica Neue explícito ahora.
+- meta-line.meta-low (texto secundario en card-tile) ahora oculto por defecto, solo se muestra si .card-tile.expanded.
+- Quitados de la UI (quedaron hardcodeados en JS): inputs cardsSourceUrlInput, imageRepoRootInput, imageExtInput y sus listeners/secciones "Cartas (GitHub)" e "Imágenes (GitHub)" en el rail de filtros.
+
+PENDIENTES / IDEAS ABIERTAS
+- Verificar si el usuario quiere UI para configurar URLs de banlist (hoy hardcodeadas, sin input, igual que cardsSourceUrl).
+
+CÓMO RETOMAR EN CHAT NUEVO
+1. Pedir al usuario que suba el .html más reciente (mirar nombre DbMyL_0_N.html, N más alto que tenga).
+2. Copiarlo a /home/claude, hacer grep de las funciones mencionadas arriba para confirmar que siguen ahí antes de tocar nada.
+3. Para probar lógica JS sin navegador: extraer funciones puntuales por rango de líneas (sed -n 'A,Bp') a un archivo aparte, evaluarlas en Node con un `state` mínimo simulado (NO usar jsdom/npm install — no hay red en el sandbox). Para datos de Excel reales, pedir el .xlsx al usuario y parsear con python openpyxl para generar JSON de prueba (cards.json) que imite el shape real (id/nombre/edicion/tipo).
+4. Recordar: sin acceso a internet en bash_tool, web_fetch no trae binarios ni raw de GitHub si roboots.txt lo bloquea — pedir archivos subidos directo cuando haga falta inspeccionar contenido real.
